@@ -1,242 +1,231 @@
-local function kick_by_reply_callback(extra, success, result)
-  if is_administrator(result.from.id) then
-    send_msg(extra, ok_cb, false)
-  else
-    local del = chat_del_user("chat#id"..result.to.id, "user#id"..result.from.id, ok_cb, false)
-    if del == false then
-      send_msg(extra, "Kicking failed.", ok_cb, false)
-      return
-    end
-  end
-end
-
-local function is_user_whitelisted(id)
-  local hash = 'whitelist:user#id'..id
-  local white = redis:get(hash) or false
-  return white
-end
-
-local function is_chat_whitelisted(id)
-  local hash = 'whitelist:chat#id'..id
-  local white = redis:get(hash) or false
-  return white
-end
-
-local function kick_user(user_id, chat_id)
-  local chat = 'chat#id'..chat_id
-  local user = 'user#id'..user_id
-  chat_del_user(chat, user, ok_cb, true)
-end
-
-local function ban_user(user_id, chat_id)
-  -- Save to redis
-  local hash =  'banned:'..chat_id..':'..user_id
-  redis:set(hash, true)
-  -- Kick from chat
-  kick_user(user_id, chat_id)
-end
-
-local function superban_user(user_id, chat_id)
-  -- Save to redis
-  local hash =  'superbanned:'..user_id
-  redis:set(hash, true)
-  -- Kick from chat
-  kick_user(user_id, chat_id)
-end
-
-local function is_banned(user_id, chat_id)
-  local hash =  'banned:'..chat_id..':'..user_id
-  local banned = redis:get(hash)
-  return banned or false
-end
-
-local function is_super_banned(user_id)
-  local hash = 'superbanned:'..user_id
-  local superbanned = redis:get(hash)
-  return superbanned or false
-end
 
 local function pre_process(msg)
   -- SERVICE MESSAGE
   if msg.action and msg.action.type then
     local action = msg.action.type
-    -- Check if banned user joins chat
-    if action == 'chat_add_user' or action == 'chat_add_user_link' then
-      local user_id
-      if msg.action.link_issuer then
-        user_id = msg.from.id
-      else
-	      user_id = msg.action.user.id
-      end
+    -- Check if banned user joins chat by link
+    if action == 'chat_add_user_link' then
+      local user_id = msg.from.id
       print('Checking invited user '..user_id)
-      local superbanned = is_super_banned(user_id)
       local banned = is_banned(user_id, msg.to.id)
-      if superbanned or banned then
-        print('User is banned!')
-        kick_user(user_id, msg.to.id)
+      if banned or is_gbanned(user_id) then -- Check it with redis
+      print('User is banned!')
+      local name = user_print_name(msg.from)
+      savelog(msg.to.id, name.." ["..msg.from.id.."] is banned and kicked ! ")-- Save to logs
+      kick_user(user_id, msg.to.id)
       end
     end
-    -- No further checks
-    return msg
-  end
-
-  -- BANNED USER TALKING
-  if msg.to.type == 'chat' then
-    local user_id = msg.from.id
-    local chat_id = msg.to.id
-    local superbanned = is_super_banned(user_id)
-    local banned = is_banned(user_id, chat_id)
-    if superbanned then
-      print('SuperBanned user talking!')
-      superban_user(user_id, chat_id)
-      msg.text = ''
-    end
-    if banned then
-      print('Banned user talking!')
-      ban_user(user_id, chat_id)
-      msg.text = ''
-    end
-  end
-  
-  -- WHITELIST
-  local hash = 'whitelist:enabled'
-  local whitelist = redis:get(hash)
-  local issudo = is_sudo(msg)
-
-  -- Allow all sudo users even if whitelist is allowed
-  if whitelist and not issudo then
-    print('Whitelist enabled and not sudo')
-    -- Check if user or chat is whitelisted
-    local allowed = is_user_whitelisted(msg.from.id)
-    if not allowed then
-      print('User '..msg.from.id..' not whitelisted')
-      if msg.to.type == 'chat' then
-        allowed = is_chat_whitelisted(msg.to.id)
-        if not allowed then
-          print ('Chat '..msg.to.id..' not whitelisted')
-        else
-          print ('Chat '..msg.to.id..' whitelisted :)')
+    -- Check if banned user joins chat
+    if action == 'chat_add_user' then
+      local user_id = msg.action.user.id
+      print('Checking invited user '..user_id)
+      local banned = is_banned(user_id, msg.to.id)
+      if banned or is_gbanned(user_id) then -- Check it with redis
+        print('User is banned!')
+        local name = user_print_name(msg.from)
+        savelog(msg.to.id, name.." ["..msg.from.id.."] added a banned user >"..msg.action.user.id)-- Save to logs
+        kick_user(user_id, msg.to.id)
+        local banhash = 'addedbanuser:'..msg.to.id..':'..msg.from.id
+        redis:incr(banhash)
+        local banhash = 'addedbanuser:'..msg.to.id..':'..msg.from.id
+        local banaddredis = redis:get(banhash) 
+        if banaddredis then 
+          if tonumber(banaddredis) == 4 and not is_owner(msg) then 
+            kick_user(msg.from.id, msg.to.id)-- Kick user who adds ban ppl more than 3 times
+          end
+          if tonumber(banaddredis) ==  8 and not is_owner(msg) then 
+            ban_user(msg.from.id, msg.to.id)-- Kick user who adds ban ppl more than 7 times
+            local banhash = 'addedbanuser:'..msg.to.id..':'..msg.from.id
+            redis:set(banhash, 0)-- Reset the Counter
+          end
         end
       end
-    else
-      print('User '..msg.from.id..' allowed :)')
+    if msg.action.user.username ~= nil then
+      if string.sub(msg.action.user.username:lower(), -3) == 'bot' and not is_momod(msg) then --- Will kick bots added by normal users
+        local name = user_print_name(msg.from)
+          savelog(msg.to.id, name.." ["..msg.from.id.."] added a bot > @".. msg.action.user.username)-- Save to logs
+          kick_user(msg.action.user.id, msg.to.id)
+      end
     end
-    if not allowed then
+  end
+    -- No further checks
+  return msg
+  end
+  -- banned user is talking !
+  if msg.to.type == 'chat' then
+    local data = load_data(_config.moderation.data)
+    local group = msg.to.id
+    local texttext = 'groups'
+    --if not data[tostring(texttext)][tostring(msg.to.id)] and not is_realm(msg) then -- Check if this group is one of my groups or not
+    --chat_del_user('chat#id'..msg.to.id,'user#id'..our_id,ok_cb,false)
+    --return 
+    --end
+    local user_id = msg.from.id
+    local chat_id = msg.to.id
+    local banned = is_banned(user_id, chat_id)
+    if banned or is_gbanned(user_id) then -- Check it with redis
+      print('Banned user talking!')
+      local name = user_print_name(msg.from)
+      savelog(msg.to.id, name.." ["..msg.from.id.."] banned user is talking !")-- Save to logs
+      kick_user(user_id, chat_id)
       msg.text = ''
     end
-    else 
-      print('Whitelist not enabled or is sudo')
-    end
-    return msg
   end
+  return msg
+end
 
 local function username_id(cb_extra, success, result)
   local get_cmd = cb_extra.get_cmd
   local receiver = cb_extra.receiver
   local chat_id = cb_extra.chat_id
   local member = cb_extra.member
-  local text = 'No user @'..member..' in this group.'
+  local text = ''
   for k,v in pairs(result.members) do
     vusername = v.username
     if vusername == member then
       member_username = member
-  	  member_id = v.id
-  	  if get_cmd == 'kick' then
-  	    return kick_user(member_id, chat_id)
-  	  elseif get_cmd == 'ban user' then
-  	    send_large_msg(receiver, 'User @'..member..' ['..member_id..'] banned')
-  	    return ban_user(member_id, chat_id)
-  	  elseif get_cmd == 'superban user' then
-  	    send_large_msg(receiver, 'User @'..member..' ['..member_id..'] globally banned!')
-  	    return superban_user(member_id, chat_id)
-  	  elseif get_cmd == 'whitelist user' then
-  	    local hash = 'whitelist:user#id'..member_id
-  	    redis:set(hash, true)
-  	    return send_large_msg(receiver, 'User @'..member..' ['..member_id..'] whitelisted')
-  	  elseif get_cmd == 'whitelist delete user' then
-  	    local hash = 'whitelist:user#id'..member_id
-  	    redis:del(hash)
-  	    return send_large_msg(receiver, 'User @'..member..' ['..member_id..'] removed from whitelist')
-  	  end
+      member_id = v.id
+      if member_id == our_id then return false end
+      if get_cmd == 'kick' then
+        if is_momod2(member_id, chat_id) then
+          return send_large_msg(receiver, "you can't kick mods/owner/admins")
+        end
+        return kick_user(member_id, chat_id)
+      elseif get_cmd == 'ban' then
+        if is_momod2(member_id, chat_id) then
+          return send_large_msg(receiver, "you can't ban mods/owner/admins")
+        end
+        send_large_msg(receiver, 'User @'..member..' ['..member_id..'] banned')
+        return ban_user(member_id, chat_id)
+      elseif get_cmd == 'unban' then
+        send_large_msg(receiver, 'User @'..member..' ['..member_id..'] unbanned')
+        local hash =  'banned:'..chat_id..':'..member_id
+        redis:del(hash)
+        return 'User '..user_id..' unbanned'
+      elseif get_cmd == 'banall' then
+        send_large_msg(receiver, 'User @'..member..' ['..member_id..'] globally banned')
+        return banall_user(member_id, chat_id)
+      elseif get_cmd == 'unbanall' then
+        send_large_msg(receiver, 'User @'..member..' ['..member_id..'] unbanned')
+        return unbanall_user(member_id, chat_id)
+      end
     end
   end
   return send_large_msg(receiver, text)
 end
-
 local function run(msg, matches)
-  if matches[1] == 'kickme' then
-    if msg.to.type ~= 'chat' then
-      return "This is not a chat group!"
-    elseif user == tostring(our_id) then
-      --[[ A robot must protect its own existence as long as such protection does
-      not conflict with the First or Second Laws. ]]--
-      return "I won't kick myself!"
-    elseif is_sudo(msg) then
-      return "I won't kick an admin!"
+  if matches[1]:lower() == 'id' then-- /id
+    if type(msg.reply_id)~="nil" then
+      local name = user_print_name(msg.from)
+        savelog(msg.to.id, name.." ["..msg.from.id.."] used /id ")
+        id = get_message(msg.reply_id,get_id_by_reply, false)
     else
+      local name = user_print_name(msg.from)
+      savelog(msg.to.id, name.." ["..msg.from.id.."] used /id ")
+      return "group id : "..msg.to.id  
+    end
+  end
+  local receiver = get_receiver(msg)
+  if matches[1]:lower() == 'kickme' then-- /kickme
+    if msg.to.type == 'chat' then
+      local name = user_print_name(msg.from)
+      savelog(msg.to.id, name.." ["..msg.from.id.."] left using kickme ")-- Save to logs
       kick_user(msg.from.id, msg.to.id)
     end
   end
-
-  local receiver = get_receiver(msg)
-  if matches[4] then
-    get_cmd = matches[1]..' '..matches[2]..' '..matches[3]
-  elseif matches[3] then
-    get_cmd = matches[1]..' '..matches[2]
-  else
-    get_cmd = matches[1]
+  if not is_momod(msg) then -- Ignore normal users 
+    return nil
   end
-
-  if matches[1] == 'ban' and is_mod(msg) then
-    local user_id = matches[3]
+  if matches[1]:lower() == "banlist" then -- Ban list !
     local chat_id = msg.to.id
-    if msg.to.type == 'chat' then
-      if matches[2] == 'user' then
-        if string.match(matches[3], '^%d+$') then
-          ban_user(user_id, chat_id)
-          send_large_msg(receiver, 'User '..user_id..' banned!')
-        else
-          local member = string.gsub(matches[3], '@', '')
-          chat_info(receiver, username_id, {get_cmd=get_cmd, receiver=receiver, chat_id=chat_id, member=member})
-        end
-      end
-      if matches[2] == 'delete' then
-        local hash =  'banned:'..chat_id..':'..user_id
-        redis:del(hash)
-        return 'User '..user_id..' unbanned'
-      end
-    else
-      return 'This isn\'t a chat group'
+    if matches[2] and is_admin(msg) then
+      chat_id = matches[2] 
     end
+    return ban_list(chat_id)
   end
-
-  if matches[1] == 'superban' and is_admin(msg) then
-    local user_id = matches[3]
-    local chat_id = msg.to.id
-    if matches[2] == 'user' then
-      if string.match(matches[3], '^%d+$') then
-        superban_user(user_id, chat_id)
-        send_large_msg(receiver, 'User '..user_id..' globally banned!')
+  if matches[1]:lower() == 'ban' then-- /ban 
+    if type(msg.reply_id)~="nil" and is_momod(msg) then
+      if is_admin(msg) then
+        local msgr = get_message(msg.reply_id,ban_by_reply_admins, false)
       else
-        local member = string.gsub(matches[3], '@', '')
-        chat_info(receiver, username_id, {get_cmd=get_cmd, receiver=receiver, chat_id=chat_id, member=member})
+        msgr = get_message(msg.reply_id,ban_by_reply, false)
       end
     end
-    if matches[2] == 'delete' then
-      local hash =  'superbanned:'..user_id
-      redis:del(hash)
-      return 'User '..user_id..' unbanned'
-    end
-  end
-
-  if matches[1] == 'kick' and is_mod(msg) then
+    local chat_id = msg.to.id
     if msg.to.type == 'chat' then
-      if msg.reply_id then
-        msgr = get_message(msg.reply_id, kick_by_reply_callback, get_receiver(msg))
-      elseif string.match(matches[2], '^%d+$') then
-        kick_user(matches[2], msg.to.id)
+      if string.match(matches[2], '^%d+$') then
+        if tonumber(matches[2]) == tonumber(our_id) then 
+          return
+        end
+        local user_id = matches[2]
+        if not is_admin(msg) and is_momod2(tonumber(matches[2]), msg.to.id) then
+          return "you can't ban mods/owner/admins"
+        end
+        if tonumber(matches[2]) == tonumber(msg.from.id) then
+          return "You can't ban your self !"
+        end
+        local name = user_print_name(msg.from)
+        savelog(msg.to.id, name.." ["..msg.from.id.."] baned user ".. matches[2])
+        ban_user(user_id, chat_id)
       else
         local member = string.gsub(matches[2], '@', '')
+        local get_cmd = 'ban'
+        local name = user_print_name(msg.from)
+        savelog(msg.to.id, name.." ["..msg.from.id.."] baned user ".. matches[2])
+        chat_info(receiver, username_id, {get_cmd=get_cmd, receiver=receiver, chat_id=msg.to.id, member=member})
+      end
+    return 'User '..user_id..' banned'
+    end
+  end
+  if matches[1]:lower() == 'unban' then -- /unban 
+    if type(msg.reply_id)~="nil" and is_momod(msg) then
+      local msgr = get_message(msg.reply_id,unban_by_reply, false)
+    end
+    local chat_id = msg.to.id
+    if msg.to.type == 'chat' then
+      local targetuser = matches[2]
+      if string.match(targetuser, '^%d+$') then
+        local user_id = targetuser
+        local hash =  'banned:'..chat_id
+        redis:srem(hash, user_id)
+        local name = user_print_name(msg.from)
+        savelog(msg.to.id, name.." ["..msg.from.id.."] unbaned user ".. matches[2])
+        return 'User '..user_id..' unbanned'
+      else
+        local member = string.gsub(matches[2], '@', '')
+        local get_cmd = 'unban'
+        chat_info(receiver, username_id, {get_cmd=get_cmd, receiver=receiver, chat_id=msg.to.id, member=member})
+      end
+    end
+  end
+
+  if matches[1]:lower() == 'kick' then -- /kick
+    if type(msg.reply_id)~="nil" and is_momod(msg) then
+      if is_admin(msg) then
+        local msgr = get_message(msg.reply_id,Kick_by_reply_admins, false)
+      else
+        msgr = get_message(msg.reply_id,Kick_by_reply, false)
+      end
+    end
+    if msg.to.type == 'chat' then
+      if string.match(matches[2], '^%d+$') then
+        if tonumber(matches[2]) == tonumber(our_id) then 
+          return
+        end
+        if not is_admin(msg) and is_momod2(matches[2], msg.to.id) then
+          return "you can't kick mods/owner/admins"
+        end
+        if tonumber(matches[2]) == tonumber(msg.from.id) then
+          return "You can't kick your self !"
+        end
+        local name = user_print_name(msg.from)
+        savelog(msg.to.id, name.." ["..msg.from.id.."] kicked user ".. matches[2])
+        kick_user(targetuser, msg.to.id)
+      else
+        local member = string.gsub(matches[2], '@', '')
+        local get_cmd = 'kick'
+        local name = user_print_name(msg.from)
+        savelog(msg.to.id, name.." ["..msg.from.id.."] kicked user ".. matches[2])
         chat_info(receiver, username_id, {get_cmd=get_cmd, receiver=receiver, chat_id=msg.to.id, member=member})
       end
     else
@@ -244,98 +233,67 @@ local function run(msg, matches)
     end
   end
 
-  if matches[1] == 'whitelist' then
-    if matches[2] == 'enable' and is_sudo(msg) then
-      local hash = 'whitelist:enabled'
-      redis:set(hash, true)
-      return 'Enabled whitelist'
-    end
-    if matches[2] == 'disable' and is_sudo(msg) then
-      local hash = 'whitelist:enabled'
-      redis:del(hash)
-      return 'Disabled whitelist'
-    end
-    if matches[2] == 'user' then
-      if string.match(matches[3], '^%d+$') then
-        local hash = 'whitelist:user#id'..matches[3]
-        redis:set(hash, true)
-        return 'User '..matches[3]..' whitelisted'
-      else
-        local member = string.gsub(matches[3], '@', '')
-        chat_info(receiver, username_id, {get_cmd=get_cmd, receiver=receiver, chat_id=msg.to.id, member=member})
-      end
-    end
-    if matches[2] == 'chat' then
-      if msg.to.type ~= 'chat' then
-        return 'This isn\'t a chat group'
-      end
-      local hash = 'whitelist:chat#id'..msg.to.id
-      redis:set(hash, true)
-      return 'Chat '..msg.to.print_name..' ['..msg.to.id..'] whitelisted'
-    end
-    if matches[2] == 'delete' and matches[3] == 'user' then
-      if string.match(matches[4], '^%d+$') then
-        local hash = 'whitelist:user#id'..matches[4]
-        redis:del(hash)
-        return 'User '..matches[4]..' removed from whitelist'
-      else
-        local member = string.gsub(matches[4], '@', '')
-        chat_info(receiver, username_id, {get_cmd=get_cmd, receiver=receiver, chat_id=msg.to.id, member=member})
-      end
-    end
-    if matches[2] == 'delete' and matches[3] == 'chat' then
-      if msg.to.type ~= 'chat' then
-        return 'This isn\'t a chat group'
-      end
-      local hash = 'whitelist:chat#id'..msg.to.id
-      redis:del(hash)
-      return 'Chat '..msg.to.print_name..' ['..msg.to.id..'] removed from whitelist'
-    end
+  if not is_admin(msg) then
+    return
   end
 
+  if matches[1]:lower() == 'banall' then -- Global ban
+    local user_id = matches[2]
+    local chat_id = msg.to.id
+    if msg.to.type == 'chat' then
+      local targetuser = matches[2]
+      if string.match(targetuser, '^%d+$') then
+        if tonumber(matches[2]) == tonumber(our_id) then
+         return false 
+        end
+        banall_user(targetuser)
+        return 'User ['..user_id..' ] globally banned'
+      else
+        local member = string.gsub(matches[2], '@', '')
+        local get_cmd = 'banall'
+        chat_info(receiver, username_id, {get_cmd=get_cmd, receiver=receiver, chat_id=msg.to.id, member=member})
+      end
+    end
+  end
+  if matches[1]:lower() == 'unbanall' then -- Global unban
+    local user_id = matches[2]
+    local chat_id = msg.to.id
+    if msg.to.type == 'chat' then
+      if string.match(matches[2], '^%d+$') then
+        if tonumber(matches[2]) == tonumber(our_id) then 
+          return false 
+        end
+        unbanall_user(user_id)
+        return 'User ['..user_id..' ] removed from global ban list'
+      else
+        local member = string.gsub(matches[2], '@', '')
+        local get_cmd = 'unbanall'
+        chat_info(receiver, username_id, {get_cmd=get_cmd, receiver=receiver, chat_id=msg.to.id, member=member})
+      end
+    end
+  end
+  if matches[1]:lower() == "gbanlist" then -- Global ban list
+    return banall_list()
+  end
 end
 
 return {
-  description = "Plugin to manage bans, kicks and white/black lists.", 
-  usage = {
-  user = "!kickme : Exit from group",
-  moderator = {
-  "!whitelist <enable>/<disable> : Enable or disable whitelist mode",
-  "!whitelist user <user_id> : Allow user to use the bot when whitelist mode is enabled",
-  "!whitelist user <username> : Allow user to use the bot when whitelist mode is enabled",
-  "!whitelist chat : Allow everybody on current chat to use the bot when whitelist mode is enabled",
-  "!whitelist delete user <user_id> : Remove user from whitelist",
-  "!whitelist delete chat : Remove chat from whitelist",
-  "!ban user <user_id> : Kick user from chat and kicks it if joins chat again",
-  "!ban user <username> : Kick user from chat and kicks it if joins chat again",
-  "!ban delete <user_id> : Unban user",
-  "!kick : Kick user from chat group by reply",
-  "!kickme : Bot kick users",
-  "!kick <user_id> : Kick user from chat group by id",
-  "!kick <username> : Kick user from chat group by username",
-  },
-  admin = {
-  "!superban user <user_id> : Kick user from all chat and kicks it if joins again",
-  "!superban user <username> : Kick user from all chat and kicks it if joins again",
-  "!superban delete <user_id> : Unban user",
-  },
-  },
   patterns = {
-  "^!(whitelist) (enable)$",
-  "^!(whitelist) (disable)$",
-  "^!(whitelist) (user) (.*)$",
-  "^!(whitelist) (chat)$",
-  "^!(whitelist) (delete) (user) (.*)$",
-  "^!(whitelist) (delete) (chat)$",
-  "^!(ban) (user) (.*)$",
-  "^!(ban) (delete) (.*)$",
-  "^!(superban) (user) (.*)$",
-  "^!(superban) (delete) (.*)$",
-  "^!(kick)$",
-  "^!(kick) (.*)$",
-  "^!(kickme)$",
-  "^!!tgservice (.+)$",
-  }, 
+    "^[!/]([Bb]anall) (.*)$",
+    "^[!/]([Bb]anlist) (.*)$",
+    "^[!/]([Bb]anlist)$",
+    "^[!/]([Gg]banlist)$",
+    "^[!/]([Bb]an) (.*)$",
+    "^[!/]([Kk]ick)$",
+    "^[!/]([Uu]nban) (.*)$",
+    "^[!/]([Uu]nbanall) (.*)$",
+    "^[!/]([Kk]ick) (.*)$",
+    "^[!/]([Kk]ickme)$",
+    "^[!/]([Bb]an)$",
+    "^[!/]([Uu]nban)$",
+    "^[!/]([Ii]d)$",
+    "^!!tgservice (.+)$",
+  },
   run = run,
   pre_process = pre_process
 }
